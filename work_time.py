@@ -31,6 +31,14 @@ def parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError("日期格式应为 YYYY-MM-DD") from error
 
 
+def parse_month(value: str) -> date:
+    try:
+        parsed_date = datetime.strptime(value, "%Y-%m").date()
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("月份格式应为 YYYY-MM") from error
+    return parsed_date.replace(day=1)
+
+
 def parse_time(value: str) -> time:
     try:
         return datetime.strptime(value, "%H:%M").time()
@@ -256,6 +264,66 @@ def show_week(args: argparse.Namespace) -> None:
     print(f"数据文件：{DATA_FILE}\n")
 
 
+def show_month(args: argparse.Namespace) -> None:
+    records = load_records()
+    month_start = args.month
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+    first_monday = month_start - timedelta(days=month_start.weekday())
+
+    print(f"\n月区间：{month_start.isoformat()} 至 {month_end.isoformat()}")
+    print("  ".join([
+        align("周区间", 23),
+        align("记录天数", 8, right=True),
+        align("周工时", 8, right=True),
+        align("相对40系数", 11, right=True),
+    ]))
+    print("-" * 58)
+
+    weekly_totals = []
+    month_total_hours = 0.0
+    month_recorded_days = 0
+    week_start = first_monday
+    while week_start <= month_end:
+        week_end = week_start + timedelta(days=6)
+        display_start = max(week_start, month_start)
+        display_end = min(week_end, month_end)
+        weekly_total = 0.0
+        recorded_days = 0
+        for offset in range(7):
+            work_date = week_start + timedelta(days=offset)
+            if work_date < month_start or work_date > month_end:
+                continue
+            record = records.get(work_date.isoformat())
+            if record is None:
+                continue
+            weekly_total += working_hours(record)
+            recorded_days += 1
+        weekly_totals.append(weekly_total)
+        month_total_hours += weekly_total
+        month_recorded_days += recorded_days
+        coefficient = weekly_total / BASE_WEEKLY_HOURS
+        print("  ".join([
+            align(f"{display_start.isoformat()} ~ {display_end.isoformat()}", 23),
+            align(str(recorded_days), 8, right=True),
+            align(f"{weekly_total:.2f}h", 8, right=True),
+            align(f"{coefficient:.2f}", 11, right=True),
+        ]))
+        week_start += timedelta(days=7)
+
+    average_weekly_hours = sum(weekly_totals) / len(weekly_totals)
+    average_coefficient = average_weekly_hours / BASE_WEEKLY_HOURS
+    print("-" * 58)
+    print(f"本月合计：{month_total_hours:.2f} 小时")
+    print(f"平均周工时：{average_weekly_hours:.2f} 小时")
+    print(f"相对 40 小时系数：{average_coefficient:.2f}")
+    if month_recorded_days:
+        print(f"已记录 {month_recorded_days} 天，日均 {month_total_hours / month_recorded_days:.2f} 小时")
+    else:
+        print("本月还没有有效记录")
+    print(f"数据文件：{DATA_FILE}\n")
+
+
 def set_target(args: argparse.Namespace) -> None:
     if args.hours is not None and args.coefficient is not None:
         raise ValueError("目标工时和系数只能选择一个设置")
@@ -285,6 +353,10 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show", help="显示包含指定日期的周一到周日汇总")
     show_parser.add_argument("--week", type=parse_date, default=date.today(), help="该日期所在周，默认本周")
     show_parser.set_defaults(func=show_week)
+
+    month_parser = subparsers.add_parser("month", help="按周显示指定月份工时并计算平均周系数")
+    month_parser.add_argument("--month", type=parse_month, default=date.today().replace(day=1), help="月份，默认本月")
+    month_parser.set_defaults(func=show_month)
 
     target_parser = subparsers.add_parser("target", help="查看或设置每周目标工时")
     target_parser.add_argument("--hours", type=float, help="每周目标工时，例如 52")

@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -183,8 +185,8 @@ class WorkTimeWindow(QMainWindow):
         self.row_inputs = []
         self.settings = load_settings()
         self.setWindowTitle("当牛作马的计时器")
-        self.resize(1060, 710)
-        self.setMinimumSize(950, 640)
+        self.resize(1180, 1080)
+        self.setMinimumSize(1060, 1020)
         self.build_ui()
         self.render_rows()
         self.refresh_summary()
@@ -324,7 +326,49 @@ class WorkTimeWindow(QMainWindow):
         self.message_label.setObjectName("muted")
         self.message_label.setWordWrap(True)
         controls_layout.addWidget(self.message_label)
-        right_panel.addStretch(1)
+
+        month_group = QGroupBox("MONTHLY // 月工时")
+        month_group.setObjectName("card")
+        month_group.setMinimumHeight(380)
+        right_panel.addWidget(month_group)
+        month_layout = QVBoxLayout(month_group)
+        month_layout.setContentsMargins(16, 18, 16, 16)
+        month_layout.setSpacing(10)
+        self.month_columns = (
+            ("周区间", 10, 126),
+            ("记录天数", 5, 58),
+            ("周工时", 5, 58),
+            ("系数", 6, 70),
+        )
+        self.month_title_label = QLabel()
+        self.month_title_label.setObjectName("muted")
+        self.month_table = QTableWidget(0, len(self.month_columns), month_group)
+        self.month_table.setObjectName("monthTable")
+        self.month_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.month_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.month_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.month_table.setShowGrid(False)
+        self.month_table.setAlternatingRowColors(True)
+        self.month_table.verticalHeader().setVisible(False)
+        self.month_table.verticalHeader().setDefaultSectionSize(32)
+        self.month_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        self.month_table.horizontalHeader().setStretchLastSection(False)
+        for column, (text, _, width) in enumerate(self.month_columns):
+            item = self.month_table.horizontalHeaderItem(column)
+            if item is None:
+                item = QTableWidgetItem(text)
+                self.month_table.setHorizontalHeaderItem(column, item)
+            else:
+                item.setText(text)
+            self.month_table.setColumnWidth(column, width)
+        self.month_table.horizontalHeader().setSectionResizeMode(0, self.month_table.horizontalHeader().ResizeMode.Stretch)
+        self.month_table.setFixedHeight(236)
+        self.month_summary_label = QLabel("本月合计 0.00 小时\n平均周工时 0.00 小时 · 系数 0.00")
+        self.month_summary_label.setObjectName("muted")
+        month_layout.addWidget(self.month_title_label)
+        month_layout.addWidget(self.month_table)
+        month_layout.addWidget(self.month_summary_label)
+        month_layout.addStretch(1)
 
         target_group = QGroupBox("TARGET // 周目标")
         target_group.setObjectName("card")
@@ -350,6 +394,7 @@ class WorkTimeWindow(QMainWindow):
         target_hint = QLabel("目标 = 40 小时 × 系数")
         target_hint.setObjectName("muted")
         target_layout.addWidget(target_hint, 2, 0, 1, 2)
+        right_panel.addStretch(1)
 
     def render_rows(self) -> None:
         previous_rows = self.row_inputs
@@ -454,6 +499,79 @@ class WorkTimeWindow(QMainWindow):
         self.remaining_label.setText(f"剩余 {max(0, weekly_target - total):.1f} H / {weekly_target:.2f} H")
         average = total / recorded if recorded else 0
         self.stats_label.setText(f"记录 {recorded} / 7 天\n日均 {average:.1f} H")
+        self.update_month_summary()
+
+    def update_month_summary(self) -> None:
+        month_start = date.today().replace(day=1)
+        next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        month_end = next_month - timedelta(days=1)
+        first_monday = month_start - timedelta(days=month_start.weekday())
+        self.month_title_label.setText(f"月区间：{month_start.isoformat()} 至 {month_end.isoformat()}")
+
+        month_dates = []
+        week_start = first_monday
+        row_index = 0
+        while week_start <= month_end:
+            month_dates.append(week_start)
+            week_start += timedelta(days=7)
+        self.month_table.setRowCount(len(month_dates))
+        weekly_totals = []
+        month_total = 0.0
+        month_recorded = 0
+        week_start = first_monday
+        row_index = 0
+        while week_start <= month_end:
+            week_end = week_start + timedelta(days=6)
+            display_start = max(week_start, month_start)
+            display_end = min(week_end, month_end)
+            weekly_total = 0.0
+            recorded_days = 0
+            for offset in range(7):
+                work_date = week_start + timedelta(days=offset)
+                if work_date < month_start or work_date > month_end:
+                    continue
+                record = self.records.get(work_date.isoformat())
+                if not record:
+                    continue
+                hours = calculate_hours(
+                    record.get("start", ""),
+                    record.get("end", ""),
+                    record.get("break_start", ""),
+                    record.get("break_end", ""),
+                    record.get("break_minutes"),
+                )
+                if hours is not None:
+                    weekly_total += hours
+                    recorded_days += 1
+            weekly_totals.append(weekly_total)
+            month_total += weekly_total
+            month_recorded += recorded_days
+
+            display_start = max(week_start, month_start)
+            display_end = min(week_end, month_end)
+            row_values = (
+                f"{display_start.isoformat()} ~ {display_end.isoformat()}",
+                str(recorded_days),
+                f"{weekly_total:.2f}h",
+                f"{weekly_total / BASE_WEEKLY_HOURS:.2f}",
+            )
+            for column, text in enumerate(row_values):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+                self.month_table.setItem(row_index, column, item)
+            row_index += 1
+            week_start += timedelta(days=7)
+
+        average_weekly_hours = sum(weekly_totals) / len(weekly_totals)
+        average_coefficient = average_weekly_hours / BASE_WEEKLY_HOURS
+        daily_text = ""
+        if month_recorded:
+            daily_text = f"\n已记录 {month_recorded} 天，月平均日工时 {month_total / month_recorded:.2f} 小时"
+        self.month_summary_label.setText(
+            f"本月合计 {month_total:.2f} 小时\n"
+            f"平均周工时 {average_weekly_hours:.2f} 小时 · 系数 {average_coefficient:.2f}"
+            f"{daily_text}"
+        )
 
     def clock_row(self, key: str, values, display: QLabel) -> None:
         start_input, end_input, break_start_input, break_end_input = values
@@ -597,6 +715,12 @@ def build_stylesheet() -> str:
     QLabel#metric { color: #39a9ff; font-family: "DejaVu Sans Mono"; font-size: 23px; font-weight: 800; }
     QProgressBar { background: #123c5f; border-radius: 4px; }
     QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4fd1c5, stop:1 #39a9ff); border-radius: 4px; }
+    QTableWidget#monthTable { background: #0a2743; alternate-background-color: #0a2743; border: 0; border-radius: 12px; gridline-color: transparent; }
+    QTableWidget#monthTable::item { background: transparent; color: #e8f6ff; padding: 4px; }
+    QHeaderView::section { background: #123c5f; color: #9ed9ff; border: 0; border-bottom: 1px solid #174c74; padding: 8px; font-size: 12px; font-weight: 700; }
+    QTableWidget#monthTable QScrollBar:vertical { background: #0a2743; width: 8px; margin: 0; }
+    QTableWidget#monthTable QScrollBar::handle:vertical { background: #174c74; border-radius: 4px; min-height: 24px; }
+    QTableWidget#monthTable QScrollBar::add-line:vertical, QTableWidget#monthTable QScrollBar::sub-line:vertical { height: 0; }
     QPushButton#primary { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2684ff, stop:1 #1462b8); border: 0; border-radius: 10px; color: white; font-weight: 700; padding: 8px; }
     QPushButton#primary:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3b98ff, stop:1 #1874d5); }
     QPushButton#secondary { background: #123c5f; border: 1px solid #39a9ff; border-radius: 10px; color: #e8f6ff; font-weight: 700; padding: 8px; }
