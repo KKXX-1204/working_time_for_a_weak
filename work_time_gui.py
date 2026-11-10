@@ -9,8 +9,8 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -32,6 +32,10 @@ from PyQt6.QtWidgets import (
 
 DATA_FILE = Path(__file__).resolve().parent / "work_hours.json"
 SETTINGS_FILE = Path(__file__).resolve().parent / "work_settings.json"
+HEALTH_DATA_FILE = Path(__file__).resolve().parent / "work_health.json"
+DRINK_IMAGE_FILE = Path(__file__).resolve().parent / "assets" / "drink.png"
+STAND_IMAGE_FILE = Path(__file__).resolve().parent / "assets" / "move.png"
+WEEKLY_IMAGE_FILE = Path(__file__).resolve().parent / "assets" / "ccp.png"
 MINIMUM_BREAK_MINUTES = 90
 BASE_WEEKLY_HOURS = 40.0
 DEFAULT_WEEKLY_TARGET_HOURS = 52.0
@@ -141,14 +145,48 @@ def save_settings(settings: dict) -> bool:
         return False
 
 
+def load_health_record() -> dict:
+    today = date.today().isoformat()
+    try:
+        with HEALTH_DATA_FILE.open("r", encoding="utf-8") as file:
+            record = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    if not isinstance(record, dict) or record.get("date") != today:
+        return {"date": today, "drink": {"count": 0, "last": None}, "stand": {"count": 0, "last": None}}
+    result = {"date": today}
+    for name in ("drink", "stand"):
+        value = record.get(name, {})
+        if not isinstance(value, dict):
+            value = {}
+        count = value.get("count", 0)
+        last = value.get("last")
+        result[name] = {
+            "count": count if isinstance(count, int) and count >= 0 else 0,
+            "last": last if isinstance(last, str) else None,
+        }
+    return result
+
+
+def save_health_record(record: dict) -> bool:
+    try:
+        with HEALTH_DATA_FILE.open("w", encoding="utf-8") as file:
+            json.dump(record, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        return True
+    except OSError:
+        return False
+
+
 class RingWidget(QWidget):
-    def __init__(self, caption: str = "", color: str = "#39a9ff", parent=None):
+    def __init__(self, caption: str = "", color: str = "#ff4d4f", image_path: Optional[Path] = None, parent=None):
         super().__init__(parent)
         self.caption = caption
         self.color = QColor(color)
+        self.image = QPixmap(str(image_path)) if image_path else QPixmap()
         self.progress = 0.0
         self.center_text = "0%"
-        self.setMinimumSize(130, 130)
+        self.setFixedSize(160, 204)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def set_progress(self, value: float, text: str) -> None:
@@ -159,11 +197,11 @@ class RingWidget(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        size = min(self.width(), self.height())
+        size = min(self.width(), 150)
         margin = 12
         diameter = size - margin * 2
         left = (self.width() - diameter) // 2
-        top = (self.height() - diameter) // 2
+        top = 12
         track = QPen(QColor("#224567"), 8)
         painter.setPen(track)
         painter.drawArc(left, top, diameter, diameter, 0, 360 * 16)
@@ -171,9 +209,102 @@ class RingWidget(QWidget):
         painter.setPen(pen)
         span = int(-360 * 16 * self.progress / 100)
         painter.drawArc(left, top, diameter, diameter, 90 * 16, span)
+
+        image_size = int(diameter * 0.58)
+        if not self.image.isNull():
+            scaled = self.image.scaled(
+                image_size,
+                image_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap((self.width() - scaled.width()) // 2, top + (diameter - scaled.height()) // 2, scaled)
+        else:
+            painter.setPen(QColor("#e8f6ff"))
+            painter.setFont(QFont("DejaVu Sans Mono", 13, QFont.Weight.Bold))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.center_text)
+
+        if self.image:
+            painter.setPen(QColor("#e8f6ff"))
+            painter.setFont(QFont("DejaVu Sans Mono", 12, QFont.Weight.Bold))
+            painter.drawText(0, top + diameter + 14, self.width(), 22, Qt.AlignmentFlag.AlignHCenter, self.center_text)
+        painter.end()
+
+
+class HealthRingWidget(QWidget):
+    def __init__(self, title: str, color: str, image_path: Path, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.color = QColor(color)
+        self.image = QPixmap(str(image_path))
+        self.count = 0
+        self.last = None
+        self.progress = 0.0
+        self.setFixedSize(190, 212)
+        self.clicked_callback = None
+
+    def set_record(self, count: int, last: Optional[datetime]) -> None:
+        self.count = count
+        self.last = last
+        self.tick()
+
+    def tick(self) -> None:
+        now = datetime.now()
+        if self.last is None:
+            minute_start = now.replace(minute=0, second=0, microsecond=0)
+            elapsed = (now - minute_start).total_seconds()
+        else:
+            elapsed = (now - self.last).total_seconds()
+            if elapsed < 0:
+                elapsed = 0
+        self.progress = min(elapsed / 3600, 1)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            center = QPointF(self.width() / 2, 30 + 132 / 2)
+            radius = 132 / 2 + 8
+            if QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2).contains(event.position()):
+                if self.clicked_callback:
+                    self.clicked_callback()
+                return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QColor("#e8f6ff"))
-        painter.setFont(QFont("DejaVu Sans Mono", 13, QFont.Weight.Bold))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.center_text)
+        painter.setFont(QFont("Noto Sans CJK SC", 10, QFont.Weight.Bold))
+        painter.drawText(0, 0, self.width(), 22, Qt.AlignmentFlag.AlignHCenter, self.title)
+
+        diameter = 132
+        left = (self.width() - diameter) // 2
+        top = 30
+        track = QPen(QColor("#224567"), 9)
+        painter.setPen(track)
+        painter.drawArc(left, top, diameter, diameter, 0, 360 * 16)
+        pen = QPen(self.color, 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        span = int(-360 * 16 * self.progress)
+        painter.drawArc(left, top, diameter, diameter, 90 * 16, span)
+
+        image_size = 82
+        if not self.image.isNull():
+            scaled = self.image.scaled(
+                image_size,
+                image_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap((self.width() - scaled.width()) // 2, top + (diameter - scaled.height()) // 2, scaled)
+
+        painter.setPen(QColor("#e8f6ff"))
+        painter.setFont(QFont("Noto Sans CJK SC", 9, QFont.Weight.Bold))
+        painter.drawText(0, top + diameter + 2, self.width(), 20, Qt.AlignmentFlag.AlignHCenter, f"今日 {self.count} 次")
+        remaining = max(0, 3600 - int(self.progress * 3600))
+        painter.setPen(QColor("#7aa6c5"))
+        painter.setFont(QFont("DejaVu Sans Mono", 8))
+        painter.drawText(0, top + diameter + 20, self.width(), 16, Qt.AlignmentFlag.AlignHCenter, f"剩余 {remaining // 60:02d}:{remaining % 60:02d}")
         painter.end()
 
 
@@ -184,10 +315,12 @@ class WorkTimeWindow(QMainWindow):
         self.records = load_records()
         self.row_inputs = []
         self.settings = load_settings()
+        self.health_record = load_health_record()
         self.setWindowTitle("当牛作马的计时器")
         self.resize(1180, 1080)
         self.setMinimumSize(1060, 1020)
         self.build_ui()
+        self.load_and_update_health()
         self.render_rows()
         self.refresh_summary()
         self.update_clock()
@@ -279,33 +412,61 @@ class WorkTimeWindow(QMainWindow):
         table_layout.addWidget(self.rows_widget)
         table_layout.addStretch(1)
 
+        health_group = QGroupBox("HEALTH // 饮水与站立")
+        health_group.setObjectName("card")
+        health_layout = QHBoxLayout(health_group)
+        health_layout.setContentsMargins(14, 16, 14, 14)
+        health_layout.setSpacing(16)
+        self.health_rings = {}
+        for name, title, color, image_path in (
+            ("drink", "饮水打卡", "#39a9ff", DRINK_IMAGE_FILE),
+            ("stand", "站立打卡", "#4fd1c5", STAND_IMAGE_FILE),
+        ):
+            ring = HealthRingWidget(title, color, image_path, health_group)
+            ring.clicked_callback = lambda health_name=name: self.clock_health(health_name)
+            button = QPushButton("打卡")
+            button.setObjectName("secondary")
+            button.clicked.connect(lambda checked=False, health_name=name: self.clock_health(health_name))
+            box = QVBoxLayout()
+            box.setSpacing(6)
+            box.addWidget(ring, 1, Qt.AlignmentFlag.AlignHCenter)
+            button.setFixedWidth(86)
+            box.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+            health_layout.addLayout(box, 1)
+            self.health_rings[name] = ring
+        table_layout.addWidget(health_group)
+
         overview_group = QGroupBox("WEEKLY OVERVIEW // 本周总览")
         overview_group.setObjectName("card")
         right_panel.addWidget(overview_group)
         overview_layout = QHBoxLayout(overview_group)
-        overview_layout.setContentsMargins(16, 18, 16, 16)
+        overview_layout.setContentsMargins(16, 16, 16, 8)
         overview_layout.setSpacing(18)
-        self.ring = RingWidget("weekly", "#39a9ff")
+        self.ring = RingWidget("weekly", "#ff4d4f", WEEKLY_IMAGE_FILE)
         overview_layout.addWidget(self.ring)
         progress_box = QVBoxLayout()
-        progress_box.setSpacing(12)
+        progress_box.setSpacing(4)
         self.total_label = QLabel("0.0 H")
         self.total_label.setObjectName("metric")
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(8)
-        self.percent_label = QLabel("已完成 0%")
+        self.percent_label = QLabel("已完成 37.1%")
         self.percent_label.setObjectName("muted")
-        self.remaining_label = QLabel("剩余 52.0 H")
+        self.remaining_label = QLabel("剩余 32.7 H")
         self.remaining_label.setObjectName("muted")
-        self.stats_label = QLabel("记录 0 / 7 天\n日均 0.0 H")
-        self.stats_label.setObjectName("muted")
+        self.recorded_label = QLabel("记录 0 / 7 天")
+        self.recorded_label.setObjectName("muted")
+        self.daily_label = QLabel("日均 0.0 H")
+        self.daily_label.setObjectName("muted")
         progress_box.addWidget(self.total_label)
         progress_box.addWidget(self.progress)
         progress_box.addWidget(self.percent_label)
         progress_box.addWidget(self.remaining_label)
-        progress_box.addWidget(self.stats_label)
+        progress_box.addWidget(self.recorded_label)
+        progress_box.addWidget(self.daily_label)
+        progress_box.addStretch(1)
         overview_layout.addLayout(progress_box, 1)
 
         controls_group = QGroupBox("DATA // 数据")
@@ -332,7 +493,7 @@ class WorkTimeWindow(QMainWindow):
         month_group.setMinimumHeight(380)
         right_panel.addWidget(month_group)
         month_layout = QVBoxLayout(month_group)
-        month_layout.setContentsMargins(16, 18, 16, 16)
+        month_layout.setContentsMargins(16, 18, 16, 8)
         month_layout.setSpacing(10)
         self.month_columns = (
             ("周区间", 10, 126),
@@ -363,11 +524,21 @@ class WorkTimeWindow(QMainWindow):
             self.month_table.setColumnWidth(column, width)
         self.month_table.horizontalHeader().setSectionResizeMode(0, self.month_table.horizontalHeader().ResizeMode.Stretch)
         self.month_table.setFixedHeight(236)
-        self.month_summary_label = QLabel("本月合计 0.00 小时\n平均周工时 0.00 小时 · 系数 0.00")
-        self.month_summary_label.setObjectName("muted")
+        self.month_summary_box = QVBoxLayout()
+        self.month_summary_box.setSpacing(4)
+        self.month_total_label = QLabel("本月合计 0.00 小时")
+        self.month_total_label.setObjectName("muted")
+        self.month_average_label = QLabel("平均周工时 0.00 小时 · 系数 0.00")
+        self.month_average_label.setObjectName("muted")
+        self.month_daily_label = QLabel("")
+        self.month_daily_label.setObjectName("muted")
+        self.month_daily_label.setVisible(False)
+        self.month_summary_box.addWidget(self.month_total_label)
+        self.month_summary_box.addWidget(self.month_average_label)
+        self.month_summary_box.addWidget(self.month_daily_label)
         month_layout.addWidget(self.month_title_label)
         month_layout.addWidget(self.month_table)
-        month_layout.addWidget(self.month_summary_label)
+        month_layout.addLayout(self.month_summary_box)
         month_layout.addStretch(1)
 
         target_group = QGroupBox("TARGET // 周目标")
@@ -498,8 +669,31 @@ class WorkTimeWindow(QMainWindow):
         self.percent_label.setText(f"已完成 {percent:.1f}%")
         self.remaining_label.setText(f"剩余 {max(0, weekly_target - total):.1f} H / {weekly_target:.2f} H")
         average = total / recorded if recorded else 0
-        self.stats_label.setText(f"记录 {recorded} / 7 天\n日均 {average:.1f} H")
+        self.recorded_label.setText(f"记录 {recorded} / 7 天")
+        self.daily_label.setText(f"日均 {average:.1f} H")
         self.update_month_summary()
+
+    def load_and_update_health(self) -> None:
+        self.health_record = load_health_record()
+        for name, ring in self.health_rings.items():
+            item = self.health_record[name]
+            last = None
+            if item["last"]:
+                try:
+                    last = datetime.fromisoformat(item["last"])
+                except ValueError:
+                    last = None
+            ring.set_record(item["count"], last)
+
+    def clock_health(self, name: str) -> None:
+        now = datetime.now()
+        item = self.health_record[name]
+        item["count"] += 1
+        item["last"] = now.isoformat(timespec="seconds")
+        self.health_rings[name].set_record(item["count"], now)
+        self.show_message(f"{self.health_rings[name].title}成功：今日 {item['count']} 次")
+        if not save_health_record(self.health_record):
+            self.show_message("健康打卡保存失败")
 
     def update_month_summary(self) -> None:
         month_start = date.today().replace(day=1)
@@ -566,12 +760,12 @@ class WorkTimeWindow(QMainWindow):
         average_coefficient = average_weekly_hours / BASE_WEEKLY_HOURS
         daily_text = ""
         if month_recorded:
-            daily_text = f"\n已记录 {month_recorded} 天，月平均日工时 {month_total / month_recorded:.2f} 小时"
-        self.month_summary_label.setText(
-            f"本月合计 {month_total:.2f} 小时\n"
-            f"平均周工时 {average_weekly_hours:.2f} 小时 · 系数 {average_coefficient:.2f}"
-            f"{daily_text}"
-        )
+            self.month_daily_label.setVisible(True)
+            self.month_daily_label.setText(f"已记录 {month_recorded} 天，月平均日工时 {month_total / month_recorded:.2f} 小时")
+        else:
+            self.month_daily_label.setVisible(False)
+        self.month_total_label.setText(f"本月合计 {month_total:.2f} 小时")
+        self.month_average_label.setText(f"平均周工时 {average_weekly_hours:.2f} 小时 · 系数 {average_coefficient:.2f}")
 
     def clock_row(self, key: str, values, display: QLabel) -> None:
         start_input, end_input, break_start_input, break_end_input = values
@@ -692,6 +886,10 @@ class WorkTimeWindow(QMainWindow):
             self.render_rows()
             self.refresh_summary()
             self.show_message("已自动切换到新的一周")
+        for ring in self.health_rings.values():
+            ring.tick()
+        for ring in self.health_rings.values():
+            ring.tick()
 
 
 def build_stylesheet() -> str:

@@ -1,2 +1,6 @@
-work_hours.json
+# Ignore Python cache files
 __pycache__
+
+# Ignore personal JSON files
+work_hours.json
+work_health.json
